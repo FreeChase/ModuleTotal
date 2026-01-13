@@ -23,3 +23,6 @@ KMP算法，在一串字符串中匹配目标字符
 
 ## wear-level2
 实现flash的均衡磨损算法，详细信息看目录下的README
+
+## spiflash_loopwrite
+增加flash ring 读写，通过全0xff 来定位最后一次写位置
