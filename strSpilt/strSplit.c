@@ -4,14 +4,7 @@
 #include "stdint.h"
 #include <stdio.h>
 #include <string.h>
-
-typedef struct 
-{
-    int itemMax;        
-    int itemUnitMax;
-    char * pdst;
-    int itemNumGet;
-}T_ParamsInfo;
+#include "strSplit.h"
 
 
 uint8_t my_crc(uint8_t * pDat, uint32_t datLen)
@@ -62,6 +55,49 @@ int isNumeric(const char *str) {
     return 1;
 }
 
+/**
+ * @brief 优化后的解析函数 (零拷贝)
+ * * @param data      输入的可变字符串 (会被 strtok 修改)
+ * @param argv      输出的指针数组
+ * @param max_args  argv 数组的最大容量
+ * @return int      解析出的参数个数 argc
+ */
+int parse_args_zero_copy(char *data, T_ParamsArg * parg)
+{
+    char *psp;
+    char *token;
+    int argc = 0;
+    char *checksum_ptr = NULL;
+
+    // 1. 查找是否存在校验位分隔符 '*'
+    //    如果有，我们需要确保 strtok 不会跨越它，或者在这里先处理它
+    //    通常协议里 * 后面的不属于常规参数，这里简单处理：
+    //    如果在字符串里发现 '*'，可以视为后续是校验和，不是参数
+    
+    token = my_strtok_r(data, ",", &psp);
+
+    while (token != NULL && argc < sizeof(parg->argv)/sizeof(parg->argv[0]))
+    {
+        // 处理形如 "10*FC" 的情况
+        char *star = strchr(token, '*');
+        if (star != NULL)
+        {
+            *star = '\0'; // 将 '*' 替换为结束符，"10*FC" 变为 "10"
+            // 如果你需要保留校验和字符串，可以用 checksum_ptr = star + 1;
+        }
+
+        // 只有非空字符串才算参数 (避免连续逗号产生空参数，视协议而定)
+        if (strlen(token) > 0) 
+        {
+            parg->argv[argc++] = token; // 直接存储指针，不拷贝字符串
+        }
+
+        token = my_strtok_r(NULL, ",", &psp);
+    }
+
+    parg->argc = argc;
+    return argc;
+}
 int parseDataProtocol(char *data , T_ParamsInfo * ptParamsInfo)
 {
     char *psp;
@@ -83,7 +119,8 @@ int parseDataProtocol(char *data , T_ParamsInfo * ptParamsInfo)
 
         token = my_strtok_r(NULL, ",", &psp);
     }
-
+//* 直接输出参数打印，方便调试
+#if 0
     printf("参数: ");
     for (int i = 0; i < param_count; i++)
     {
@@ -108,26 +145,26 @@ int parseDataProtocol(char *data , T_ParamsInfo * ptParamsInfo)
         }
     }
     printf("\n");
-
-    return 0;
+#endif 
+    return param_count;
 }
 
+void DispatchFromParsedData(T_ParamsArg * ptparamsinfo );
 int main() {
-    // 示例数据
-    char data[] = "$TSTMODE,print,1,2,3.14,,Hello,world,*FC";
-    char data2[] = "BDCNO,,0,";
-    char data3[] = "BDCOV,0,25,0,";
-    uint8_t crcValue;
-    T_ParamsInfo paramInfo;
 
-    memset((char*)&paramInfo,0,sizeof(paramInfo));
-    paramInfo.itemMax = 50;
-    paramInfo.itemUnitMax = 64;
-    paramInfo.pdst = malloc(paramInfo.itemMax*(paramInfo.itemUnitMax+1));
+    T_ParamsArg argParams;
 
-    parseDataProtocol(data,&paramInfo);
 
-    crcValue = my_crc(data3,strlen(data3));
-    printf("crc 0x%x\r\n",crcValue);
+    char data5[] = "$ANTI,time,15*FC";
+    parse_args_zero_copy(data5,&argParams);
+
+    DispatchFromParsedData(&argParams);
+    printf("argc : %d\n", argParams.argc);
+    printf("argv 0 : %s\n", argParams.argv[0]);
+    printf("argv 1 : %s\n", argParams.argv[1]);
+    printf("argv 2 : %s\n", argParams.argv[2]);
+    // printf("argv 3 : %s\n", argParams.argv[3]);
+
+
     return 0;
 }

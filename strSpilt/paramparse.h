@@ -28,7 +28,19 @@ typedef enum
 } ShellNumType;
 
 
+typedef struct 
+{
+    int itemMax;        
+    int itemUnitMax;
+    char * pdst;
+    int itemNumGet;
+}T_ParamsInfo;
 
 
+typedef struct 
+{
+    int argc;        
+    char * argv[10];
+}T_ParamsArg;
 
 #endif
