@@ -1,0 +1,575 @@
+#include <stdint.h>
+#include <string.h>
+#include <stdio.h>
+
+/* ================= 配置 ================= */
+#define FLASH_SIZE          (16 * 1024)   
+#define SECTOR_SIZE         (4 * 1024)    
+#define UNIT_SIZE           (1 * 1024)    
+
+#define SECTOR_NUM          (FLASH_SIZE / SECTOR_SIZE)
+#define UNITS_PER_SECTOR    (SECTOR_SIZE / UNIT_SIZE)
+#define TOTAL_UNITS         (FLASH_SIZE / UNIT_SIZE)
+
+#define CFG_MAGIC           0x43464721u 
+
+/* ================= 数据结构 ================= */
+#pragma pack(4)
+typedef struct {
+    uint32_t magic;
+    uint32_t length;
+    uint32_t checksum;
+} cfg_hdr_t;
+
+typedef struct {
+    uint32_t write_unit;
+} ring_log_t;
+#pragma pack()
+
+ring_log_t glog;
+
+
+
+
+#include <stdio.h>
+#include <stdint.h>
+#include <stdarg.h>
+#include <stdbool.h>
+
+
+typedef struct {
+    int width;          // 字段宽度
+    bool left_align;    // 左对齐标志
+    char pad_char;      // 填充字符
+    bool is_uppercase;  // 大写标志
+    int min_digits;     // 最小位数
+    int precision;      // 浮点数精度
+} format_info;
+
+// 辅助函数：向缓冲区写入字符
+static char print_buffer[32];
+static int buffer_pos = 0;
+
+void my_putchar(char c) {
+    // 实际实现时替换为您的输出函数
+    putchar(c);
+}
+
+void my_puts(const char *s) {
+    while (*s) {
+        my_putchar(*s++);
+    }
+}
+
+// 辅助函数：获取整数部分的位数
+int get_num_width(uint64_t num, int base) {
+    int width = 0;
+    do {
+        width++;
+        num /= base;
+    } while (num > 0);
+    return width;
+}
+
+// 辅助函数：处理浮点数
+void print_float(double num, int precision) {
+    // 处理负数
+    if (num < 0) {
+        my_putchar('-');
+        num = -num;
+    }
+    
+    // 处理整数部分
+    uint64_t int_part = (uint64_t)num;
+    double frac_part = num - int_part;
+    
+    // 打印整数部分
+    if (int_part == 0) {
+        my_putchar('0');
+    } else {
+        char int_buffer[20];
+        int i = 0;
+        while (int_part > 0) {
+            int_buffer[i++] = '0' + (int_part % 10);
+            int_part /= 10;
+        }
+        while (i > 0) {
+            my_putchar(int_buffer[--i]);
+        }
+    }
+    
+    // 如果指定了精度，打印小数部分
+    if (precision > 0) {
+        my_putchar('.');
+        
+        // 处理小数部分
+        while (precision > 0) {
+            frac_part *= 10;
+            int digit = (int)frac_part;
+            my_putchar('0' + digit);
+            frac_part -= digit;
+            precision--;
+        }
+    }
+}
+
+// 辅助函数：解析格式化信息
+format_info parse_format(const char **format) {
+    format_info info = {0, false, ' ', false, 0, 6};  // 默认精度为6
+    
+    // 检查左对齐标志
+    if (**format == '-') {
+        info.left_align = true;
+        (*format)++;
+    }
+    
+    // 检查填充字符
+    if (**format == '0') {
+        info.pad_char = '0';
+        (*format)++;
+    }
+    
+    // 解析宽度
+    while (**format >= '0' && **format <= '9') {
+        info.width = info.width * 10 + (**format - '0');
+        (*format)++;
+    }
+    
+    // 解析精度
+    if (**format == '.') {
+        (*format)++;
+        info.precision = 0;
+        while (**format >= '0' && **format <= '9') {
+            info.precision = info.precision * 10 + (**format - '0');
+            (*format)++;
+        }
+    }
+    
+    return info;
+}
+
+// 辅助函数：填充字符
+void pad_space(char pad_char, int count) {
+    while (count-- > 0) {
+        my_putchar(pad_char);
+    }
+}
+
+// 辅助函数：输出十六进制数
+void print_hex(uint64_t num, int min_digits, bool uppercase) {
+    char hex[16];
+    int i = 0;
+    
+    if (num == 0) {
+        int zeros = min_digits ? min_digits : 1;
+        while (zeros--) my_putchar('0');
+        return;
+    }
+    
+    while (num) {
+        int digit = num & 0xF;
+        hex[i++] = digit < 10 ? '0' + digit : 
+                   (uppercase ? 'A' : 'a') + (digit - 10);
+        num >>= 4;
+    }
+    
+    while (i < min_digits) hex[i++] = '0';
+    
+    while (i--) my_putchar(hex[i]);
+}
+
+void xprintf(const char *format, ...) {
+    va_list args;
+    va_start(args, format);
+    
+    while (*format) {
+        if (*format == '%') {
+            format++; // 跳过%
+            
+            // 解析格式化信息
+            format_info info = parse_format(&format);
+            
+            switch (*format) {
+                case 'f': {
+                    double num = va_arg(args, double);
+                    // 计算整个数字的长度（包括小数点和小数部分）
+                    char temp_buf[32];
+                    int num_len = snprintf(temp_buf, sizeof(temp_buf), "%.*f", 
+                                         info.precision, num);
+                    
+                    if (!info.left_align) {
+                        pad_space(info.pad_char, info.width - num_len);
+                    }
+                    print_float(num, info.precision);
+                    if (info.left_align) {
+                        pad_space(info.pad_char, info.width - num_len);
+                    }
+                    break;
+                }
+                
+                case 's': {
+                    char *str = va_arg(args, char *);
+                    int len = 0;
+                    char *p = str;
+                    while (*p++) len++;
+                    
+                    if (!info.left_align) {
+                        pad_space(info.pad_char, info.width - len);
+                    }
+                    my_puts(str);
+                    if (info.left_align) {
+                        pad_space(info.pad_char, info.width - len);
+                    }
+                    break;
+                }
+                
+                case 'p': {
+                    void *ptr = va_arg(args, void *);
+                    my_putchar('0');
+                    my_putchar('x');
+                    print_hex((uint64_t)ptr, sizeof(void*) * 2, true);
+                    break;
+                }
+                
+                case 'X':
+                    info.is_uppercase = true;
+                    // fall through
+                case 'x': {
+                    unsigned int num = va_arg(args, unsigned int);
+                    if (info.pad_char == '0' && info.width > 0) {
+                        print_hex(num, info.width, info.is_uppercase);
+                    } else {
+                        int num_width = get_num_width(num, 16);
+                        if (!info.left_align && info.width > num_width) {
+                            pad_space(info.pad_char, info.width - num_width);
+                        }
+                        print_hex(num, 0, info.is_uppercase);
+                        if (info.left_align && info.width > num_width) {
+                            pad_space(info.pad_char, info.width - num_width);
+                        }
+                    }
+                    break;
+                }
+                
+                case 'c': {
+                    char c = (char)va_arg(args, int);
+                    my_putchar(c);
+                    break;
+                }
+                
+                case 'l': {
+                    format++;
+                    if (*format == 'l' && *(format + 1) == 'X') {
+                        format++;
+                        uint64_t num = va_arg(args, uint64_t);
+                        print_hex(num, 16, true);
+                    }
+                    break;
+                }
+                
+                default:
+                    my_putchar('%');
+                    my_putchar(*format);
+                    break;
+            }
+        } else {
+            my_putchar(*format);
+        }
+        format++;
+    }
+    
+    va_end(args);
+}
+
+void memdisplay(void *start_addr, size_t length, size_t unit_size) {
+    if (unit_size != 1 && unit_size != 2 && unit_size != 4 && unit_size != 8) {
+        xprintf("Invalid unit_size. Please use 1, 2, 4, or 8.\n");
+        return;
+    }
+
+    size_t bytes_per_line = 16;
+    uint8_t *mem = (uint8_t *)start_addr;
+
+    // 打印列头
+    xprintf("%-10s", "Address");
+    for (size_t i = 0; i < bytes_per_line; ++i) {
+        xprintf("0x%X ", i);
+    }
+    xprintf("  ASCII\n");
+
+    // 打印横线
+    xprintf("------------------");
+    for (size_t i = 0; i < bytes_per_line; ++i) {
+        xprintf("-----");
+    }
+    xprintf("\n");
+
+    size_t addr = 0;
+    while (addr < length) {
+        // 打印行头地址
+        xprintf("%p  ", (void *)(mem + addr));
+
+        // 打印每行的内容
+        for (size_t i = 0; i < bytes_per_line && addr < length; i += unit_size) {
+            switch (unit_size) {
+                case 1:
+                    xprintf("%02X  ", mem[addr + i]);
+                    break;
+                case 2:
+                    xprintf("%04X    ", *((uint16_t *)(mem + addr + i)));
+                    break;
+                case 4:
+                    xprintf("%08X        ", *((uint32_t *)(mem + addr + i)));
+                    break;
+                case 8:
+                    xprintf("%016llX   ", *((uint64_t *)(mem + addr + i)));
+                    break;
+                default:
+                    // 不太可能到达这里，因为上面已经检查了 unit_size 的合法性
+                    break;
+            }
+        }
+
+        // 打印ASCII码
+        xprintf("  ");
+        for (size_t i = 0; i < bytes_per_line && addr < length; ++i) {
+            char c = (mem[addr + i] >= 32 && mem[addr + i] <= 126) ? mem[addr + i] : '.';
+            xprintf("%c", c);
+        }
+
+        xprintf("\n");
+        addr += bytes_per_line;
+    }
+}
+
+// int main() {
+//     int arr[256];
+//     char ch[256];
+//     size_t arr_length = sizeof(arr) / sizeof(arr[0]);
+
+//     for (size_t i = 0; i < 256; i++) {
+//         arr[i] = i;
+//         ch[i] = i;
+//     }
+
+//     memdisplay(ch, 256, 1);
+//     memdisplay(ch, 256, 2);
+//     memdisplay(ch, 256, 4);
+
+//     return 0;
+// }
+
+
+/* ================= Flash Mock (底层驱动模拟) ================= */
+static uint8_t g_flash[FLASH_SIZE];
+
+static void spiflash_read(uint32_t addr, void *buf, uint32_t len) {
+    memcpy(buf, &g_flash[addr], len);
+}
+
+static void spiflash_write(uint32_t addr, const void *buf, uint32_t len) {
+    // 模拟 Flash 特性：只能把 1 写成 0
+    for (uint32_t i = 0; i < len; i++) {
+        g_flash[addr + i] &= ((const uint8_t *)buf)[i];
+    }
+}
+
+static void spiflash_erase_sector(uint32_t sector) {
+    printf("[Flash] Erasing Sector %u...\n", sector);
+    memset(&g_flash[sector * SECTOR_SIZE], 0xFF, SECTOR_SIZE);
+}
+
+/* ================= 工具函数 ================= */
+static inline uint32_t unit_addr(uint32_t unit) {
+    return unit * UNIT_SIZE;
+}
+
+static uint32_t calculate_checksum(const uint8_t *data, uint32_t len) {
+    uint32_t checksum = 0;
+    for (uint32_t i = 0; i < len; i++) checksum ^= data[i];
+    return checksum;
+}
+
+/**
+ * 优化版：仅检查扇区前 64 字节是否为全 0xFF
+ * 这样可以大幅缩短初始化时扫描 Flash 的时间
+ */
+static int sector_is_ff(uint32_t sector) {
+    uint8_t buf[64]; 
+    uint32_t addr = sector * SECTOR_SIZE;
+
+    // 一次性读出前 64 字节，减少驱动调用开销
+    spiflash_read(addr, buf, sizeof(buf));
+
+    for (uint32_t i = 0; i < sizeof(buf); i++) {
+        if (buf[i] != 0xFF) {
+            return 0; // 只要有任何一字节不是 0xFF，即判定为脏
+        }
+    }
+    return 1;
+}
+
+static int unit_is_valid(uint32_t unit, cfg_hdr_t *hdr) {
+    spiflash_read(unit_addr(unit), hdr, sizeof(cfg_hdr_t));
+    if (hdr->magic != CFG_MAGIC) return 0;
+    if (hdr->length == 0 || hdr->length > UNIT_SIZE - sizeof(cfg_hdr_t)) return 0;
+
+    uint8_t buf[UNIT_SIZE];
+    spiflash_read(unit_addr(unit) + sizeof(cfg_hdr_t), buf, hdr->length);
+    return (calculate_checksum(buf, hdr->length) == hdr->checksum);
+}
+
+/* ================= 核心 API ================= */
+
+/**
+ * 初始化逻辑：上电自愈
+ */
+void ring_log_init(ring_log_t *l) {
+    int found_empty = 0;
+    for (uint32_t s = 0; s < SECTOR_NUM; s++) {
+        if (sector_is_ff(s)) {
+            l->write_unit = s * UNITS_PER_SECTOR;
+            found_empty = 1;
+            break;
+        }
+    }
+
+    if (!found_empty) {
+        spiflash_erase_sector(0);
+        l->write_unit = 0;
+    }
+    printf("[Init] Ready to write at Unit %u\n", l->write_unit);
+}
+
+/**
+ * 写入逻辑：运行时仅维护预留空间 (Guard Sector)
+ */
+int ring_cfg_write(ring_log_t *l, const void *cfg, uint32_t len) {
+    if (len > UNIT_SIZE - sizeof(cfg_hdr_t)) return -1;
+
+    if ((l->write_unit % UNITS_PER_SECTOR) == 0) {
+        uint32_t next_s = (l->write_unit / UNITS_PER_SECTOR + 1) % SECTOR_NUM;
+        spiflash_erase_sector(next_s);
+    }
+
+    uint32_t addr = unit_addr(l->write_unit);
+    spiflash_write(addr + sizeof(cfg_hdr_t), cfg, len);
+    
+    cfg_hdr_t hdr = {
+        .magic = CFG_MAGIC,
+        .length = len,
+        .checksum = calculate_checksum((const uint8_t *)cfg, len)
+    };
+    spiflash_write(addr, &hdr, sizeof(hdr));
+
+    l->write_unit = (l->write_unit + 1) % TOTAL_UNITS;
+    return 0;
+}
+
+int ring_cfg_read_latest(ring_log_t *l, void *out_buf, uint32_t buf_size, uint32_t *out_len) {
+    for (uint32_t i = 1; i <= TOTAL_UNITS; i++) {
+        uint32_t curr_u = (l->write_unit - i) % TOTAL_UNITS;
+        cfg_hdr_t hdr;
+        if (unit_is_valid(curr_u, &hdr)) {
+            //* allow hdr.length low or high than buf_size
+            spiflash_read(unit_addr(curr_u) + sizeof(cfg_hdr_t), out_buf, hdr.length);
+            *out_len = hdr.length;
+            printf("!!!flash read2!!!\n");
+            return 0;
+        }
+    }
+    printf("!!!flash read3!!!\n");
+    return -1;
+}
+
+/* ================= 测试 ================= */
+
+static void dump_flash(void)
+{
+    printf("Flash state:\n");
+    for (uint32_t s = 0; s < SECTOR_NUM; s++) {
+        printf(" Sector %u : %s\n", s, sector_is_ff(s) ? "ALL FF" : "DATA");
+    }
+    printf("glog.write_unit: %u\n", glog.write_unit);
+    /* ff_sector 变量已移除，无需打印 */
+}
+
+static void dump_flash_realdata(void)
+{
+    printf("Flash Read Data:\n");
+    for (uint32_t s = 0; s < TOTAL_UNITS; s++) {
+        printf(" Sector %u :\n", s);
+        memdisplay(&g_flash[s*UNIT_SIZE], 16, 1);
+    }
+    
+    /* ff_sector 变量已移除，无需打印 */
+}
+int main(void) {
+    uint8_t buf[512];
+    
+    // memset(buf, 0xAA, sizeof(buf));
+    for (int i = 0; i < 512; i++) {
+        // memset(buf, i, sizeof(buf));
+        buf[i] = 0x10 + i;
+    }
+    memset(g_flash, 0xFF, sizeof(g_flash));
+
+    int read_val;
+    uint32_t read_len;
+    dump_flash();
+    printf("--- Test 1: Normal Boot ---\n");
+    ring_log_init(&glog);
+    int d = 100;
+    ring_cfg_write(&glog, &d, sizeof(d));
+    
+    // dump_flash();
+    printf("\n--- Test 2: Start On All Dirty Flash ---\n");
+    // 人为弄脏所有扇区 
+
+    memset(g_flash, 0x00, sizeof(g_flash));
+    dump_flash();
+    
+
+    ring_log_init(&glog); // 这里应该打印 Self-healing
+
+    dump_flash();
+    // dump_flash();
+    printf("\n--- Test 3: Test write and read  ---\n");
+
+    ring_log_init(&glog);
+
+    for (int i = 0; i < 10; i++) {
+        // memset(buf, i, sizeof(buf));
+        buf[ 0 ] = 0x20+i;
+        ring_cfg_write(&glog, buf,sizeof(buf));
+        dump_flash();
+    }
+    ring_cfg_read_latest(&glog, &read_val, sizeof(read_val), &read_len);
+    printf("Latest Data: 0x%x\n", read_val);
+    printf("Latest Len : %d\n", read_len);
+
+    printf("\n--- Test 4: Init and read , manual destroy lasted data---\n");
+
+    ring_log_init(&glog);
+    //* manual destroy the last data
+    g_flash[9* UNIT_SIZE] = 0;
+
+    ring_cfg_read_latest(&glog, &read_val, sizeof(read_val), &read_len);
+    printf("Latest Data: 0x%x\n", read_val);
+    printf("Latest Len : %d\n", read_len);
+
+    dump_flash();
+
+    printf("\n--- Test 5: Init and write ,test writecount ---\n");
+
+    ring_log_init(&glog);
+
+    dump_flash();
+    buf[0]=0x33;
+    ring_cfg_write(&glog, buf,sizeof(buf));
+
+
+    dump_flash();
+    // dump_flash_realdata();
+    return 0;
+}
