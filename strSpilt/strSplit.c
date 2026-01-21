@@ -98,56 +98,6 @@ int parse_args_zero_copy(char *data, T_ParamsArg * parg)
     parg->argc = argc;
     return argc;
 }
-int parseDataProtocol(char *data , T_ParamsInfo * ptParamsInfo)
-{
-    char *psp;
-    char *token = my_strtok_r(data, ",", &psp);
-    // char pDst[50][50];
-    int param_count = 0;
-
-    if(ptParamsInfo == NULL)
-    {
-        //提示fail信息
-        return -1;
-    }
-
-    while (token != NULL)
-    {
-        // strcpy(pDst[param_count], token);
-        strcpy(ptParamsInfo->pdst + param_count*ptParamsInfo->itemUnitMax , token);
-        param_count++;
-
-        token = my_strtok_r(NULL, ",", &psp);
-    }
-//* 直接输出参数打印，方便调试
-#if 0
-    printf("参数: ");
-    for (int i = 0; i < param_count; i++)
-    {
-        printf("\r\nindex %d ",i);
-        if (isNumeric(ptParamsInfo->pdst+i*ptParamsInfo->itemUnitMax))
-        {
-            if (strchr(ptParamsInfo->pdst+i*ptParamsInfo->itemUnitMax, '.'))
-            {
-                printf(" f ");
-                printf("%f ", atof(ptParamsInfo->pdst+i*ptParamsInfo->itemUnitMax));
-            }
-            else
-            {
-                printf(" i ");
-                printf("%d ", atoi(ptParamsInfo->pdst+i*ptParamsInfo->itemUnitMax));
-            }
-        }
-        else
-        {
-            printf(" s ");
-            printf("%s ", ptParamsInfo->pdst+i*ptParamsInfo->itemUnitMax);
-        }
-    }
-    printf("\n");
-#endif 
-    return param_count;
-}
 
 void DispatchFromParsedData(T_ParamsArg * ptparamsinfo );
 int main() {
