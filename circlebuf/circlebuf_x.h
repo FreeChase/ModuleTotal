@@ -9,8 +9,8 @@ extern "C" {
 typedef struct {
     char *buffer;
     int size;
-    int head;
-    int tail;
+    volatile int head;
+    volatile int tail;
 } CircularBuffer;
 
 
