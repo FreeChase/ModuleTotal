@@ -12,3 +12,8 @@
     | paramparse.c   | 解析传入ascii文本<br>浮点、十进制、十六进制均可 |
     | strSplit.c     | 主要实现my_strtok,分割字符                      |
     | cmd_dispatch.c | 实现命令回调函数功能                            |
+
+
+## 编译命令
+
+gcc .\strSplit.c .\paramparse.c .\cmd_dispatch.c -o str_handle -std=c99

@@ -115,6 +115,13 @@ int main() {
     printf("argv 2 : %s\n", argParams.argv[2]);
     // printf("argv 3 : %s\n", argParams.argv[3]);
 
+    char data6[] = "$help*FC";
+    parse_args_zero_copy(data6,&argParams);
 
+    DispatchFromParsedData(&argParams);
+    printf("argc : %d\n", argParams.argc);
+    printf("argv 0 : %s\n", argParams.argv[0]);
+    printf("argv 1 : %s\n", argParams.argv[1]);
+    printf("argv 2 : %s\n", argParams.argv[2]);
     return 0;
 }
