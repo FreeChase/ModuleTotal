@@ -199,7 +199,7 @@ int ring_cfg_write(ring_log_t *l, const void *cfg, uint32_t len) {
 
     if ((l->write_unit % UNITS_PER_SECTOR) == 0) {
         // uint32_t next_s = (l->write_unit / UNITS_PER_SECTOR + 1) % SECTOR_NUM;
-        addr =  unit_addr(l->write_unit+UNITS_PER_SECTOR);
+        addr =  unit_addr((l->write_unit+UNITS_PER_SECTOR)%TOTAL_UNITS);
         spiflash_erase_sector(addr);
     }
 
