@@ -1,6 +1,6 @@
 #include "key_core.h"
 #include <stddef.h> // for NULL
-
+#include "stdio.h"
 // 内部状态机状态
 typedef enum {
     STATE_IDLE = 0,
@@ -16,8 +16,8 @@ void Key_Init(KeyHandle_t *key, pFuncReadPin read_fn, pFuncKeyCallback cb_fn, vo
     key->user_data = user_data;
     
     // 默认参数 (假设 Tick 周期 10ms)
-    key->debounce_ticks = 2;     // 2 * 10ms = 20ms
-    key->long_press_ticks = 150; // 150 * 10ms = 1.5s
+    key->debounce_ticks = 20;     // 2 * 10ms = 20ms
+    key->long_press_ticks = 1000; // 150 * 10ms = 1.5s
     
     key->state = STATE_IDLE;
     key->tick_count = 0;
@@ -25,13 +25,14 @@ void Key_Init(KeyHandle_t *key, pFuncReadPin read_fn, pFuncKeyCallback cb_fn, vo
     key->event_triggered = 0;
 }
 
-void Key_Tick(KeyHandle_t *key, uint8_t cycle_ms)
+void Key_Tick(KeyHandle_t *key, uint16_t cycle_ms)
 {
     if (!key->fn_read_pin) return;
 
     // 读取当前物理电平 (1表示按下/有效)
     uint8_t active = key->fn_read_pin(key->user_data);
-
+    // printf("active :%d\r\n",active);
+    // printf("key->state :%d\r\n",key->state);
     switch (key->state)
     {
     case STATE_IDLE:
@@ -43,7 +44,7 @@ void Key_Tick(KeyHandle_t *key, uint8_t cycle_ms)
 
     case STATE_DEBOUNCE:
         if (active) {
-            key->tick_count++;
+            key->tick_count += cycle_ms;
             if (key->tick_count >= key->debounce_ticks) {
                 // 消抖通过，确认按下
                 key->state = STATE_PRESSED;
@@ -60,7 +61,7 @@ void Key_Tick(KeyHandle_t *key, uint8_t cycle_ms)
     case STATE_PRESSED:
         if (active) {
             // 持续按下，计算长按
-            key->tick_count++;
+            key->tick_count += cycle_ms;
             if (key->tick_count >= key->long_press_ticks) {
                 if (!key->event_triggered) {
                     key->state = STATE_LONG_PRESS_HOLD;

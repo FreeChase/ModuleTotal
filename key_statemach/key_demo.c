@@ -1,96 +1,137 @@
-#include <stdio.h>
-#include <stdint.h>
-#ifdef _WIN32
-#include <windows.h> // 仅用于 Sleep
-#else
-#include <unistd.h> // Linux下用 usleep
-#endif
+
+
 #include "key_core.h"
+#include "stdio.h"
+// --- 按键适配层开始 ---
 
-// 全局变量：模拟 GPIO 电平 (0:低/松开, 1:高/按下)
-uint8_t simulated_gpio_level = 0;
 
-// 1. [适配层] 读取模拟引脚
-uint8_t Sim_ReadPin(void *user_data)
-{
-    // 直接返回全局变量的值
-    return simulated_gpio_level;
-}
+#if 1
+// 模拟事件
+typedef enum {
+    EVENT_NONE = 0,                 // 0
+    EVENT_IDLE,                     // 1
+    EVENT_TICK,                     // 2
+    EVENT_CMD_LV1_SwitchtoInit,     // 3  * Power Up and Timeout ,Enter Normal Work
+    EVENT_CMD_LV1_SwitchtoWork,     // 4
+    EVENT_CMD_LV1_PeriodicRead,     // 5  * periodic read sensor data
+    EVENT_CMD_LV1_ErrorDetect,      // 6  * function output
+    EVENT_CMD_LV1_FunctionOutput,   // 7  * function output
+    EVENT_CMD_LV1_CleanMode,        // 8
+    EVENT_CMD_LV1_SwitchtoAlarm,    // 9
+    EVENT_CMD_LV1_SwitchtoDeliver,  // 10
 
-// 2. [适配层] 事件回调
-void Sim_KeyCallback(KeyHandle_t *key, KeyEvent_t event)
-{
-    const char* evtStr = "UNKNOWN";
-    switch (event) {
-        case KEY_EVENT_DOWN:       evtStr = "DOWN (Pressed)"; break;
-        case KEY_EVENT_UP:         evtStr = "UP (Released)"; break;
-        case KEY_EVENT_CLICK:      evtStr = ">>> CLICK (Short Press) <<<"; break;
-        case KEY_EVENT_LONG_PRESS: evtStr = "!!! LONG PRESS DETECTED !!!"; break;
-        default: break;
-    }
-    
-    // 打印当前时间(tick)和事件
-    printf("[Callback] State Machine Triggered: %s\n", evtStr);
-}
+    // ------ Gap (11 ~ 511) ------
 
-// 辅助函数：跨平台延时 (ms)
-void DelayMs(int ms) {
-#ifdef _WIN32
-    Sleep(ms);
-#else
-    usleep(ms * 1000);
+    EVENT_LV2_DS18B20READ   = 0x200,// 512 (0x200)
+    EVENT_LV2_ATTRREAD,             // 513 (0x201)
+    EVENT_LV2_FANREAD,              // 514 (0x202)
+    EVENT_LV2_FUNCCHECK,            // 515 (0x203)
+    EVENT_LV2_RETURN_WORK,          // 516 (0x204)
+    EVENT_MAX,                      // 517 (0x205)
+} EventType_t;
 #endif
-}
 
-int main()
+typedef struct {
+    uint32_t *port;     // GPIO 端口
+    uint16_t      pin;      // GPIO 引脚
+    int           short_event_id; // 短按发送的事件ID
+    int           long_event_id;  // 长按发送的事件ID (0表示无长按)
+    int           up_event_id;  // 长按发送的事件ID (0表示无长按)
+} KeyHwConfig_t;
+
+// 定义按键句柄
+KeyHandle_t hKeyClean;
+// KeyHandle_t hKeyMode;
+// KeyHandle_t hKeyAC;
+
+// 定义按键的硬件配置 (根据 main.h 中的定义)
+// 注意：根据你的 gpio.c，这些引脚是上拉输入，所以低电平有效
+KeyHwConfig_t cfgClean = {(uint32_t*)0xffff,   0xffff, 0, EVENT_CMD_LV1_CleanMode, EVENT_CMD_LV1_SwitchtoWork};
+// KeyHwConfig_t cfgMode  = {KEY_MODE_GPIO_Port,  KEY_MODE_Pin,  EVENT_CMD_LV1_ErrorDetect, EVENT_CMD_LV1_FunctionOutput};
+// KeyHwConfig_t cfgAC    = {KEY_AC_GPIO_Port,    KEY_AC_Pin,    EVENT_CMD_LV1_SwitchtoWork, 0}; // 假设 AC 键切回工作模式
+
+// --- 适配函数实现 ---
+
+// 1. 告诉核心层如何读取你的 STM32 引脚
+uint8_t Platform_ReadPin(void *user_data)
 {
-    KeyHandle_t hKey;
-    uint32_t current_tick = 0; // 模拟系统时钟
+    KeyHwConfig_t *hw = (KeyHwConfig_t *)user_data;
     
-    printf("--- Key State Machine Software Simulation ---\n");
-    printf("Simulating ticks (1 tick = 10ms)...\n\n");
+    static uint16_t state_array[6] ={1,1,0,0,0,0};
+    // 读取物理电平
+    static uint16_t cnt =0;
+    uint16_t state ;
 
-    // 初始化: 消抖 20ms (2 ticks), 长按 1000ms (100 ticks)
-    Key_Init(&hKey, Sim_ReadPin, Sim_KeyCallback, NULL);
-    hKey.debounce_ticks = 2;
-    hKey.long_press_ticks = 100; 
-
-    // 主循环：模拟时间流逝
-    while (current_tick < 400) // 模拟 400 个周期 (4秒)
+    if(cnt<6)
     {
-        // --- 脚本化模拟 GPIO 变化 ---
-        
-        // 场景 1: 短按测试 (第 50 tick 按下, 第 60 tick 松开)
-        if (current_tick == 50) {
-            printf("\n[Script] User PRESSES button (Short)\n");
-            simulated_gpio_level = 1;
-        }
-        if (current_tick == 60) {
-            printf("[Script] User RELEASES button\n");
-            simulated_gpio_level = 0;
-        }
-
-        // 场景 2: 长按测试 (第 150 tick 按下, 第 300 tick 松开)
-        // 此时应该在按下 100 ticks 后 (即 tick=250+消抖) 触发长按事件
-        if (current_tick == 150) {
-            printf("\n[Script] User PRESSES button (Long)\n");
-            simulated_gpio_level = 1;
-        }
-        if (current_tick == 300) {
-            printf("[Script] User RELEASES button\n");
-            simulated_gpio_level = 0;
-        }
-
-        // --- 核心逻辑 ---
-        // 每次循环调用一次 Tick，假设周期为 10ms
-        Key_Tick(&hKey, 10);
-        
-        current_tick++;
-        
-        // 为了看清输出，稍微延时一下 (实际MCU中不需要)
-        DelayMs(10); 
+        state = state_array[cnt++];
+    }
+    else
+    {
+        state = 1;
     }
     
-    printf("\n--- Simulation Finished ---\n");
+    // 因为是 GPIO_PULLUP (上拉)，所以：
+    // 物理低电平 (RESET) = 按下 (逻辑 1)
+    // 物理高电平 (SET)   = 松开 (逻辑 0)
+    return (state == 0) ? 1 : 0;
+}
+
+// 2. 告诉核心层事件发生后如何通知你的系统
+void Platform_KeyCallback(KeyHandle_t *key, KeyEvent_t event)
+{
+    KeyHwConfig_t *hw = (KeyHwConfig_t *)key->user_data;
+    printf("Key Click11: Event %d\r\n", event);
+    switch (event)
+    {
+    case KEY_EVENT_CLICK: // 短按
+        if (hw->short_event_id != 0) {
+            printf("Key Click: Event %d\r\n", hw->short_event_id);
+            // Event_Put(hw->short_event_id); // 发送事件给你的状态机
+        }
+        break;
+
+    case KEY_EVENT_LONG_PRESS: // 长按
+        if (hw->long_event_id != 0) {
+            printf("Key LongPress: Event %d\r\n", hw->long_event_id);
+            // Event_Put(hw->long_event_id);
+        }
+        break;
+    case KEY_EVENT_UP: // 抬起
+        if (hw->up_event_id != 0) {
+            printf("Key Up: Event %d\r\n", hw->up_event_id);
+            // Event_Put(hw->up_event_id);
+        }
+        break;
+        
+    default:
+        break;
+    }
+}
+// --- 按键适配层结束 ---
+
+
+
+void PreInit(void)
+{
+
+
+
+	// 初始化 Clean 键 (默认参数: 消抖20ms, 长按1s)
+    Key_Init(&hKeyClean, Platform_ReadPin, Platform_KeyCallback, &cfgClean);
+
+
+}
+
+int main(int argc,char* argv[])
+{
+    PreInit();
+
+    for (size_t i = 0; i < 10; i++)
+    {
+        Key_Tick(&hKeyClean, 500);
+    }
+
+    printf("Hello World\r\n");
     return 0;
 }

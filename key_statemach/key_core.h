@@ -67,7 +67,7 @@ void Key_Init(KeyHandle_t *key, pFuncReadPin read_fn, pFuncKeyCallback cb_fn, vo
  * @param key 句柄指针
  * @param cycle_ms 调用此函数的周期(ms)，用于计算时间，如果设为1则 ticks = ms
  */
-void Key_Tick(KeyHandle_t *key, uint8_t cycle_ms);
+void Key_Tick(KeyHandle_t *key, uint16_t cycle_ms);
 
 #ifdef __cplusplus
 }
