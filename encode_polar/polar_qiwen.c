@@ -9,12 +9,11 @@
 #define LIST_SIZE 8
 #define CRC_POLY 0x1021
 
-// 预定义最大支持的配置，替代动态分配
 #define MAX_N 1024
-#define MAX_STAGES 10  // log2(MAX_N)
+#define MAX_STAGES 10
 
 // ==========================================
-// 1. 核心上下文结构体 (多维数组版)
+// 1. 核心上下文结构体
 // ==========================================
 typedef struct {
     int N;             
@@ -22,43 +21,47 @@ typedef struct {
     int n_stages;      
     int frozen_flag[MAX_N];  
     
-    // SCL 多路径状态
     int active_paths;
     double path_metric[LIST_SIZE];
     
-    // 直接使用多维数组替代三级指针，内存连续，Cache 极其友好！
+    // LLR[l][stage][index] - stage 0是叶子，stage n是信道
     double LLR[LIST_SIZE][MAX_STAGES + 1][MAX_N];
+    // C[l][stage][index] - 部分和
     int C[LIST_SIZE][MAX_STAGES + 1][MAX_N];
+    // 路径估计比特
     int path_u_est[LIST_SIZE][MAX_N]; 
 
-    // 将深拷贝用的备份数组也放入上下文，避免在 decode 运行时分配内存或爆栈
+    // 备份数组 (用于路径分裂时的深拷贝)
     double backup_LLR[LIST_SIZE][MAX_STAGES + 1][MAX_N];
     int backup_C[LIST_SIZE][MAX_STAGES + 1][MAX_N];
     int backup_path_u_est[LIST_SIZE][MAX_N];
 } PolarContext;
 
+// ==========================================
+// 2. 冻结位生成 (修复为：极化权重法 PW)
+// ==========================================
 void init_polar_system(PolarContext *ctx, int N, int K) {
-    // 确保传入的 N 不超过我们预定义的最大值
     if (N > MAX_N) {
-        printf("Error: N exceeds MAX_N. Please increase MAX_N.\n");
+        printf("Error: N exceeds MAX_N.\n");
         exit(1);
     }
     
-    // 清空结构体，所有数组初始值为 0
     memset(ctx, 0, sizeof(PolarContext));
     
     ctx->N = N;
     ctx->K = K;
     ctx->n_stages = (int)log2(N);
     
+    // 使用 PW (Polarization Weight) 算法计算可靠度，避免汉明重量的严重冲突
     double scores[MAX_N] = {0};
     for (int i = 0; i < N; i++) {
         for (int j = 0; j < ctx->n_stages; j++) {
-            if ((i >> j) & 1) scores[i] += pow(1.25, j);
+            if ((i >> j) & 1) scores[i] += pow(1.25, j); 
         }
         ctx->frozen_flag[i] = 1; 
     }
     
+    // 选出得分最高的 K 个信道作为信息位
     for (int k = 0; k < K; k++) {
         double max_score = -1.0;
         int max_idx = 0;
@@ -73,7 +76,7 @@ void init_polar_system(PolarContext *ctx, int N, int K) {
 }
 
 // ==========================================
-// 2. CRC 与 发射机编码 (保持不变)
+// 3. CRC
 // ==========================================
 void append_crc(const int *payload, int payload_len, int *output_msg) {
     uint16_t crc = 0xFFFF;
@@ -107,13 +110,19 @@ int check_crc(const int *msg, int total_len) {
     return 1; 
 }
 
+// ==========================================
+// 4. Polar 编码
+// ==========================================
 void polar_encode(PolarContext *ctx, const int *message, int *x) {
     int u[MAX_N] = {0};
     int msg_idx = 0;
+    
     for (int i = 0; i < ctx->N; i++) {
         u[i] = (ctx->frozen_flag[i] == 1) ? 0 : message[msg_idx++];
     }
+    
     memcpy(x, u, ctx->N * sizeof(int));
+    
     for (int stage = 0; stage < ctx->n_stages; stage++) {
         int step = 1 << stage;
         for (int i = 0; i < ctx->N; i += 2 * step) {
@@ -125,7 +134,7 @@ void polar_encode(PolarContext *ctx, const int *message, int *x) {
 }
 
 // ==========================================
-// 3. 物理信道 (保持不变)
+// 5. AWGN 信道
 // ==========================================
 double generate_gaussian_noise(double std_dev) {
     double u1 = (double)rand() / RAND_MAX;
@@ -135,53 +144,79 @@ double generate_gaussian_noise(double std_dev) {
 }
 
 // ==========================================
-// 4. 接收机：CA-SCL 译码器 (去除了恶心的深拷贝循环)
+// 6. LLR 计算函数 (标准F/G函数)
 // ==========================================
-typedef struct { int src_idx; int bit_val; double pm; } PathCandidate;
+double f_func(double a, double b) {
+    double sign = (a * b >= 0) ? 1.0 : -1.0;
+    double min_abs = fmin(fabs(a), fabs(b));
+    return sign * min_abs;
+}
+
+double g_func(double a, double b, int u) {
+    return b + ((u == 0) ? a : -a);
+}
+
+// ==========================================
+// 7. CA-SCL 译码器 (修复了块更新逻辑)
+// ==========================================
+typedef struct { 
+    int src_idx; 
+    int bit_val; 
+    double pm; 
+} PathCandidate;
 
 int compare_pm(const void *a, const void *b) {
     double diff = ((PathCandidate *)a)->pm - ((PathCandidate *)b)->pm;
-    return (diff > 0) - (diff < 0);
+    if (fabs(diff) < 1e-9) return 0;
+    return (diff > 0) ? 1 : -1;
 }
 
 void ca_scl_decode(PolarContext *ctx, double *rx_llr, int *best_message) {
     int n = ctx->n_stages;
+    
     ctx->active_paths = 1;
     ctx->path_metric[0] = 0.0;
-    memcpy(ctx->LLR[0][n], rx_llr, ctx->N * sizeof(double));
-
+    
+    for (int l = 0; l < LIST_SIZE; l++) {
+        memcpy(ctx->LLR[l][n], rx_llr, ctx->N * sizeof(double));
+        memset(ctx->C[l], 0, (MAX_STAGES + 1) * MAX_N * sizeof(int));
+        memset(ctx->path_u_est[l], 0, MAX_N * sizeof(int));
+        if (l > 0) ctx->path_metric[l] = 1e9;
+    }
+    
     for (int phi = 0; phi < ctx->N; phi++) {
+        
+        // 1. Down-pass (批量计算当前所需的所有 LLR)
         int start_stage = (phi == 0) ? n : 0;
         if (phi != 0) {
             int diff = phi ^ (phi - 1);
             while (diff > 0) { start_stage++; diff >>= 1; }
         }
 
-        // 1. Down-pass
         for (int l = 0; l < ctx->active_paths; l++) {
             for (int s = start_stage; s >= 1; s--) {
-                int length = 1 << s, half = length / 2;
+                int half = 1 << (s - 1);
                 int is_right = (phi >> (s - 1)) & 1;
+
                 if (!is_right) {
                     for (int i = 0; i < half; i++) {
-                        double a = ctx->LLR[l][s][i], b = ctx->LLR[l][s][i + half];
-                        ctx->LLR[l][s - 1][i] = (a * b > 0 ? 1.0 : -1.0) * 0.75 * fmin(fabs(a), fabs(b)); 
+                        ctx->LLR[l][s - 1][i] = f_func(ctx->LLR[l][s][i], ctx->LLR[l][s][i + half]);
                     }
                 } else {
                     for (int i = 0; i < half; i++) {
-                        double a = ctx->LLR[l][s][i], b = ctx->LLR[l][s][i + half];
-                        ctx->LLR[l][s - 1][i] = b + ((ctx->C[l][s][i] == 0) ? a : -a);
+                        ctx->LLR[l][s - 1][i] = g_func(ctx->LLR[l][s][i], ctx->LLR[l][s][i + half], ctx->C[l][s][i]);
                     }
                 }
             }
         }
-
+        
         // 2. 叶子节点判决与路径分裂
         if (ctx->frozen_flag[phi] == 1) {
             for (int l = 0; l < ctx->active_paths; l++) {
-                ctx->C[l][0][0] = 0;
-                if (ctx->LLR[l][0][0] < 0) ctx->path_metric[l] += fabs(ctx->LLR[l][0][0]);
+                double llr = ctx->LLR[l][0][0];
+                if (llr < 0) ctx->path_metric[l] += fabs(llr);
                 ctx->path_u_est[l][phi] = 0;
+                ctx->C[l][0][0] = 0;
             }
         } else {
             PathCandidate candidates[LIST_SIZE * 2];
@@ -199,31 +234,31 @@ void ca_scl_decode(PolarContext *ctx, double *rx_llr, int *best_message) {
             }
             
             int old_active = ctx->active_paths;
-
-            // [巨幅简化] 直接将状态备份到上下文中预留的数组，只需几次 memcpy
+            
+            // 集中备份
             memcpy(ctx->backup_LLR, ctx->LLR, old_active * (MAX_STAGES + 1) * MAX_N * sizeof(double));
             memcpy(ctx->backup_C, ctx->C, old_active * (MAX_STAGES + 1) * MAX_N * sizeof(int));
             memcpy(ctx->backup_path_u_est, ctx->path_u_est, old_active * MAX_N * sizeof(int));
-
-            // 从备份中恢复并覆写工作区
+            
+            // 覆写分配
             for (int i = 0; i < cand_count; i++) {
                 int src = candidates[i].src_idx;
+                int bit = candidates[i].bit_val;
                 
                 memcpy(ctx->LLR[i], ctx->backup_LLR[src], (MAX_STAGES + 1) * MAX_N * sizeof(double));
                 memcpy(ctx->C[i], ctx->backup_C[src], (MAX_STAGES + 1) * MAX_N * sizeof(int));
                 memcpy(ctx->path_u_est[i], ctx->backup_path_u_est[src], MAX_N * sizeof(int));
                 
                 ctx->path_metric[i] = candidates[i].pm;
-                ctx->C[i][0][0] = candidates[i].bit_val;
-                ctx->path_u_est[i][phi] = candidates[i].bit_val;
+                ctx->path_u_est[i][phi] = bit;
+                ctx->C[i][0][0] = bit;
             }
             ctx->active_paths = cand_count;
         }
 
-        // 3. Up-pass
-        int temp_phi = phi;
+        // 3. Up-pass (部分和矩阵向上逐级合并传递)
         for (int l = 0; l < ctx->active_paths; l++) {
-            int tp = temp_phi;
+            int tp = phi;
             for (int s = 0; s < n; s++) {
                 if (!(tp & 1)) {
                     for (int i = 0; i < (1 << s); i++) ctx->C[l][s + 1][i] = ctx->C[l][s][i];
@@ -238,7 +273,7 @@ void ca_scl_decode(PolarContext *ctx, double *rx_llr, int *best_message) {
             }
         }
     }
-
+    
     // 4. CRC 校验筛选
     int best_idx = 0;
     double min_pm = 1e9;
@@ -248,7 +283,9 @@ void ca_scl_decode(PolarContext *ctx, double *rx_llr, int *best_message) {
         int extracted_msg[MAX_N];
         int idx = 0;
         for (int i = 0; i < ctx->N; i++) {
-            if (ctx->frozen_flag[i] == 0) extracted_msg[idx++] = ctx->path_u_est[l][i];
+            if (ctx->frozen_flag[i] == 0) {
+                extracted_msg[idx++] = ctx->path_u_est[l][i];
+            }
         }
         
         if (check_crc(extracted_msg, ctx->K)) {
@@ -264,36 +301,41 @@ void ca_scl_decode(PolarContext *ctx, double *rx_llr, int *best_message) {
         min_pm = 1e9;
         for (int l = 0; l < ctx->active_paths; l++) {
             if (ctx->path_metric[l] < min_pm) {
-                min_pm = ctx->path_metric[l]; best_idx = l;
+                min_pm = ctx->path_metric[l];
+                best_idx = l;
             }
         }
     }
-
+    
     int idx = 0;
     for (int i = 0; i < ctx->N; i++) {
-        if (ctx->frozen_flag[i] == 0) best_message[idx++] = ctx->path_u_est[best_idx][i];
+        if (ctx->frozen_flag[i] == 0) {
+            best_message[idx++] = ctx->path_u_est[best_idx][i];
+        }
     }
 }
 
 // ==========================================
-// 5. 主程序端到端验证
+// 8. 主程序仿真
 // ==========================================
 int main() {
     srand((unsigned)time(NULL));
+    
     int N = 1024;
     int payload_len = 496;
     int crc_len = 16;
     int K = payload_len + crc_len; 
 
-    printf("=== Polar 码 (多维数组版优化) ===\n\n");
+    printf("╔══════════════════════════════════════════════════╗\n");
+    printf("║     Polar 码 CA-SCL 译码器 (已修复版)            ║\n");
+    printf("║     N=%d, K=%d, List=%d, CRC=%d                  ║\n", N, K, LIST_SIZE, crc_len);
+    printf("╚══════════════════════════════════════════════════╝\n\n");
 
-    // 【重要】因为多维数组让结构体变大，请务必用 malloc 分配在堆上，避免局部变量爆栈
     PolarContext *engine = (PolarContext *)malloc(sizeof(PolarContext));
     if (engine == NULL) {
         printf("Memory allocation failed!\n");
         return -1;
     }
-    init_polar_system(engine, N, K);
 
     int *raw_payload   = (int *)malloc(payload_len * sizeof(int));
     int *msg_with_crc  = (int *)malloc(K * sizeof(int));
@@ -301,28 +343,65 @@ int main() {
     double *llr        = (double *)malloc(N * sizeof(double));
     int *decoded_msg   = (int *)malloc(K * sizeof(int));
 
-    for (int i = 0; i < payload_len; i++) raw_payload[i] = rand() % 2;
-    append_crc(raw_payload, payload_len, msg_with_crc);
-    polar_encode(engine, msg_with_crc, x);
+    double snr_db_list[] = {1.5, 2.0, 2.5, 3.0, 3.5, 4.0};
+    int num_snr = sizeof(snr_db_list) / sizeof(snr_db_list[0]);
+    int frames_per_snr = 100;
 
-    double noise_std_dev = 0.85; 
-    for (int i = 0; i < N; i++) {
-        double y = ((x[i] == 0) ? 1.0 : -1.0) + generate_gaussian_noise(noise_std_dev);
-        llr[i] = 2.0 * y / (noise_std_dev * noise_std_dev);
+    printf("开始多SNR性能测试 (每点 %d 帧)...\n\n", frames_per_snr);
+    printf("%-8s %-10s %-10s %-10s\n", "SNR(dB)", "错误帧", "错误比特", "BER");
+    printf("────────────────────────────────────────\n");
+
+    for (int snr_idx = 0; snr_idx < num_snr; snr_idx++) {
+        double snr_db = snr_db_list[snr_idx];
+        
+        init_polar_system(engine, N, K);
+
+        int frame_errors = 0;
+        int total_bit_errors = 0;
+
+        for (int frame = 0; frame < frames_per_snr; frame++) {
+            for (int i = 0; i < payload_len; i++) {
+                raw_payload[i] = rand() % 2;
+            }
+            
+            append_crc(raw_payload, payload_len, msg_with_crc);
+            polar_encode(engine, msg_with_crc, x);
+
+            double noise_std = pow(10, -snr_db / 20.0);
+            for (int i = 0; i < N; i++) {
+                double y = ((x[i] == 0) ? 1.0 : -1.0) + generate_gaussian_noise(noise_std);
+                llr[i] = 2.0 * y / (noise_std * noise_std);
+            }
+
+            ca_scl_decode(engine, llr, decoded_msg);
+
+            int bit_errors = 0;
+            for (int i = 0; i < payload_len; i++) {
+                if (decoded_msg[i] != raw_payload[i]) {
+                    bit_errors++;
+                }
+            }
+            
+            if (bit_errors > 0) {
+                frame_errors++;
+            }
+            total_bit_errors += bit_errors;
+        }
+
+        double ber = (double)total_bit_errors / (frames_per_snr * payload_len);
+        
+        printf("%-8.1f %-10d %-10d %-10.6f\n", 
+               snr_db, frame_errors, total_bit_errors, ber);
     }
-    printf("[1/3] 信道：AWGN (Standard Dev = %.2f)\n", noise_std_dev);
-    printf("[2/3] 接收：CA-SCL 译码 (List Size = %d)...\n", LIST_SIZE);
-    
-    ca_scl_decode(engine, llr, decoded_msg);
 
-    int errors = 0;
-    for (int i = 0; i < payload_len; i++) {
-        if (decoded_msg[i] != raw_payload[i]) errors++;
-    }
-    printf("[3/3] 统计：纯随机数据载荷中，解码错误 %d 位。\n", errors);
+    printf("────────────────────────────────────────\n");
+    printf("测试完成!\n\n");
 
-    // 释放内存：因为移除了内部复杂的动态分配，释放过程非常干净
-    free(raw_payload); free(msg_with_crc); free(x); free(llr); free(decoded_msg);
+    free(raw_payload);
+    free(msg_with_crc);
+    free(x);
+    free(llr);
+    free(decoded_msg);
     free(engine); 
     
     return 0;
