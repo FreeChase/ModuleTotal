@@ -38,27 +38,22 @@ typedef struct {
 } PolarContext;
 
 // ==========================================
-// 2. 冻结位生成 (修复为：极化权重法 PW)
+// 2. 冻结位生成与系统初始化 (支持 AMC 动态更新)
 // ==========================================
-void init_polar_system(PolarContext *ctx, int N, int K) {
-    if (N > MAX_N) {
-        printf("Error: N exceeds MAX_N.\n");
-        exit(1);
-    }
-    
-    memset(ctx, 0, sizeof(PolarContext));
-    
+
+// 新增接口：动态更新冻结位 (轻量级，专为变码率设计)
+void update_frozen_bits(PolarContext *ctx, int N, int K) {
     ctx->N = N;
     ctx->K = K;
     ctx->n_stages = (int)log2(N);
     
-    // 使用 PW (Polarization Weight) 算法计算可靠度，避免汉明重量的严重冲突
+    // 使用 PW (Polarization Weight) 算法计算可靠度
     double scores[MAX_N] = {0};
     for (int i = 0; i < N; i++) {
         for (int j = 0; j < ctx->n_stages; j++) {
             if ((i >> j) & 1) scores[i] += pow(1.25, j); 
         }
-        ctx->frozen_flag[i] = 1; 
+        ctx->frozen_flag[i] = 1; // 默认全部重置为冻结位
     }
     
     // 选出得分最高的 K 个信道作为信息位
@@ -71,8 +66,22 @@ void init_polar_system(PolarContext *ctx, int N, int K) {
                 max_idx = i;
             }
         }
-        ctx->frozen_flag[max_idx] = 0; 
+        ctx->frozen_flag[max_idx] = 0; // 解除冻结
     }
+}
+
+// 系统级初始化 (仅在设备上电/分配内存后调用 1 次)
+void init_polar_system(PolarContext *ctx, int N, int K) {
+    if (N > MAX_N) {
+        printf("Error: N exceeds MAX_N.\n");
+        exit(1);
+    }
+    
+    // 彻底清空结构体内存分配
+    memset(ctx, 0, sizeof(PolarContext));
+    
+    // 分配初始的冻结位
+    update_frozen_bits(ctx, N, K);
 }
 
 // ==========================================
@@ -157,7 +166,7 @@ double g_func(double a, double b, int u) {
 }
 
 // ==========================================
-// 7. CA-SCL 译码器 (修复了块更新逻辑)
+// 7. CA-SCL 译码器
 // ==========================================
 typedef struct { 
     int src_idx; 
@@ -174,6 +183,7 @@ int compare_pm(const void *a, const void *b) {
 void ca_scl_decode(PolarContext *ctx, double *rx_llr, int *best_message) {
     int n = ctx->n_stages;
     
+    // --- 逐帧状态重置 (支持重复调用) ---
     ctx->active_paths = 1;
     ctx->path_metric[0] = 0.0;
     
@@ -184,6 +194,7 @@ void ca_scl_decode(PolarContext *ctx, double *rx_llr, int *best_message) {
         if (l > 0) ctx->path_metric[l] = 1e9;
     }
     
+    // --- SCL 树搜索 ---
     for (int phi = 0; phi < ctx->N; phi++) {
         
         // 1. Down-pass (批量计算当前所需的所有 LLR)
@@ -327,15 +338,17 @@ int main() {
     int K = payload_len + crc_len; 
 
     printf("╔══════════════════════════════════════════════════╗\n");
-    printf("║     Polar 码 CA-SCL 译码器 (已修复版)            ║\n");
+    printf("║     Polar 码 CA-SCL 译码器 (AMC 支持版)          ║\n");
     printf("║     N=%d, K=%d, List=%d, CRC=%d                  ║\n", N, K, LIST_SIZE, crc_len);
     printf("╚══════════════════════════════════════════════════╝\n\n");
 
+    // 【优化】：系统只需在最开始初始化一次！
     PolarContext *engine = (PolarContext *)malloc(sizeof(PolarContext));
     if (engine == NULL) {
         printf("Memory allocation failed!\n");
         return -1;
     }
+    init_polar_system(engine, N, K);
 
     int *raw_payload   = (int *)malloc(payload_len * sizeof(int));
     int *msg_with_crc  = (int *)malloc(K * sizeof(int));
@@ -353,28 +366,31 @@ int main() {
 
     for (int snr_idx = 0; snr_idx < num_snr; snr_idx++) {
         double snr_db = snr_db_list[snr_idx];
-        
-        init_polar_system(engine, N, K);
-
         int frame_errors = 0;
         int total_bit_errors = 0;
 
         for (int frame = 0; frame < frames_per_snr; frame++) {
+            
+            // 模拟产生新的一帧数据
             for (int i = 0; i < payload_len; i++) {
                 raw_payload[i] = rand() % 2;
             }
             
+            // 编码
             append_crc(raw_payload, payload_len, msg_with_crc);
             polar_encode(engine, msg_with_crc, x);
 
+            // 模拟信道和环路积分输出 LLR
             double noise_std = pow(10, -snr_db / 20.0);
             for (int i = 0; i < N; i++) {
                 double y = ((x[i] == 0) ? 1.0 : -1.0) + generate_gaussian_noise(noise_std);
                 llr[i] = 2.0 * y / (noise_std * noise_std);
             }
 
+            // 【优化】：直接重复调用解码器，无需任何清理操作
             ca_scl_decode(engine, llr, decoded_msg);
 
+            // 统计错误
             int bit_errors = 0;
             for (int i = 0; i < payload_len; i++) {
                 if (decoded_msg[i] != raw_payload[i]) {
@@ -382,16 +398,12 @@ int main() {
                 }
             }
             
-            if (bit_errors > 0) {
-                frame_errors++;
-            }
+            if (bit_errors > 0) frame_errors++;
             total_bit_errors += bit_errors;
         }
 
         double ber = (double)total_bit_errors / (frames_per_snr * payload_len);
-        
-        printf("%-8.1f %-10d %-10d %-10.6f\n", 
-               snr_db, frame_errors, total_bit_errors, ber);
+        printf("%-8.1f %-10d %-10d %-10.6f\n", snr_db, frame_errors, total_bit_errors, ber);
     }
 
     printf("────────────────────────────────────────\n");
